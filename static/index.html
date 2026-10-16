@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Financial Article Summarizer</title>
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #ffffff; --text: #1c2430; --muted: #66707d;
+      --border: #d9dde3; --accent: #1f5fbf; --accent-text: #ffffff;
+      --error-bg: #fdecea; --error-text: #8a1c14;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #14181d; --card: #1d232b; --text: #e6e9ee; --muted: #9aa4b1;
+        --border: #313a45; --accent: #5b9bf0; --accent-text: #0d1117;
+        --error-bg: #3a1c1a; --error-text: #f5b5ae;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    .subtitle { color: var(--muted); margin: 0 0 20px; }
+    form { display: flex; gap: 8px; flex-wrap: wrap; }
+    input[type="url"] {
+      flex: 1 1 280px; padding: 10px 12px; font: inherit; color: var(--text);
+      background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    }
+    button {
+      padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer;
+      color: var(--accent-text); background: var(--accent); border: 0; border-radius: 8px;
+    }
+    button:disabled { opacity: .6; cursor: progress; }
+    .status { margin-top: 16px; color: var(--muted); }
+    .error {
+      margin-top: 16px; padding: 12px 14px; border-radius: 8px;
+      background: var(--error-bg); color: var(--error-text);
+    }
+    .result {
+      margin-top: 20px; padding: 20px; background: var(--card);
+      border: 1px solid var(--border); border-radius: 12px;
+    }
+    .result h2 { font-size: 1.2rem; margin: 0 0 12px; }
+    .result ul { padding-left: 20px; margin: 0 0 12px; }
+    .result li, .result p { margin: 0 0 8px; }
+    .meta { color: var(--muted); font-size: .875rem; margin: 12px 0 0; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Financial Article Summarizer</h1>
+    <p class="subtitle">Paste a link to a public financial news article to get a short summary.</p>
+
+    <form id="form">
+      <input id="url" type="url" placeholder="https://..." required autofocus aria-label="Article URL">
+      <button id="submit" type="submit">Summarize</button>
+    </form>
+
+    <p id="status" class="status" role="status" hidden></p>
+    <div id="error" class="error" role="alert" hidden></div>
+
+    <section id="result" class="result" hidden>
+      <h2 id="title"></h2>
+      <div id="summary"></div>
+      <p id="meta" class="meta"></p>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById("form");
+    const urlInput = document.getElementById("url");
+    const submitBtn = document.getElementById("submit");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const resultEl = document.getElementById("result");
+    const titleEl = document.getElementById("title");
+    const summaryEl = document.getElementById("summary");
+    const metaEl = document.getElementById("meta");
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setLoading(true);
+
+      try {
+        const response = await fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: urlInput.value.trim() }),
+        });
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          // FastAPI sends detail as a string for our errors, as a list for validation errors.
+          const detail = data && typeof data.detail === "string"
+            ? data.detail
+            : "The request was rejected. Check the URL and try again.";
+          showError(detail);
+          return;
+        }
+        showResult(data);
+      } catch (err) {
+        showError("Could not reach the server. Is it running?");
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    function setLoading(loading) {
+      submitBtn.disabled = loading;
+      urlInput.disabled = loading;
+      statusEl.hidden = !loading;
+      statusEl.textContent = loading
+        ? "Fetching and summarizing... the first request can take up to a minute while the model loads."
+        : "";
+      if (loading) {
+        errorEl.hidden = true;
+        resultEl.hidden = true;
+      }
+    }
+
+    function showError(message) {
+      errorEl.textContent = message;  // textContent: never inject server text as HTML
+      errorEl.hidden = false;
+    }
+
+    function showResult(data) {
+      titleEl.textContent = data.title || "(untitled article)";
+      renderSummary(data.summary);
+      metaEl.textContent =
+        (data.cached ? "From cache" : "Freshly generated") + " · model: " + data.model;
+      resultEl.hidden = false;
+    }
+
+    // Turn "- point" lines into a list; everything else becomes a paragraph.
+    function renderSummary(text) {
+      summaryEl.replaceChildren();
+      let list = null;
+      for (const rawLine of text.split("\n")) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const bullet = line.match(/^[-*•]\s+(.*)$/);
+        if (bullet) {
+          if (!list) {
+            list = document.createElement("ul");
+            summaryEl.appendChild(list);
+          }
+          const li = document.createElement("li");
+          li.textContent = bullet[1];
+          list.appendChild(li);
+        } else {
+          list = null;
+          const p = document.createElement("p");
+          p.textContent = line;
+          summaryEl.appendChild(p);
+        }
+      }
+    }
+  </script>
+</body>
+</html>

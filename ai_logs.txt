@@ -1,0 +1,300 @@
+
+take-home-EPAM.rtf
+take-home-EPAM.rtf
+RTF
+Hi! I'm attaching the requirements for a Python project, which I have to build. I'll use this chat to ask you for clarification, trade-offs, reviews of my code and overall validation. Project structure I'd use:
+summarizer/
+   main.py
+   scraper.py
+   summarizer.py
+   db.py
+   static/
+      index.html
+   tests/
+      test_scraper.py
+   requirements.txt
+   README.md
+   ai-logs/
+Confirm your understanding and we begin.
+
+Read memory
+Here’s my understanding, plus a few things to settle before you start.
+
+The task. You build a web service where a user submits a public financial-article URL. The backend fetches and parses the article, summarizes it with an LLM, caches the result per URL, and returns it. A minimal frontend lets the user submit a URL and read the summary. The deliverables are:
+
+A public GitHub repo or Gist.
+A README covering design choices, trade-offs, setup, running the app and running tests.
+Your AI chat logs, committed to the repo, with a README note on which tools you used and for what.
+They say they’re grading engineering quality, not summary quality. That means clean structure, testability, a sensible API and well-argued trade-offs. They’ll also ask you to walk through and defend any part of the code in the follow-up interview.
+
+How I’ll work with you. You write the Python. I’ll explain options and trade-offs, help plan, and review your code. I won’t write the implementation for you, and BeautifulSoup is a good thing to learn by doing here.
+
+Your structure. It maps well to the brief. Here is where I’d push back or ask questions:
+
+Add config.py, or at least a clear place for settings. You’ll need the model name, API key, timeouts and the DB path. Reading them from environment variables keeps secrets out of the repo, and reviewers notice that.
+Models. Put the Pydantic request and response schemas in main.py for now, or a small schemas.py. Either is fine at this size.
+Tests. The brief stresses “testable”, but you only list test_scraper.py. I’d also add test_summarizer.py with the LLM call mocked, and a small API test for main.py with FastAPI’s TestClient. Cache behavior (a second request skips the LLM) is the most interview-relevant thing to test.
+ai-logs/. Since this chat is the log, export it at the end. Commit the export as-is and don’t edit it.
+Optional extras. A Dockerfile is “optional but recommended”, and a .env.example is cheap.
+Decisions to make early, because each one affects the rest:
+
+Summarization backend: Hugging Face Inference API (the easiest start, but it needs a free-tier token and has rate limits), local ollama (no API key, but a heavy setup for the reviewer to reproduce), or a hosted API you already know. You’ve used LangChain, but it’s probably overkill here, and a thin wrapper around one HTTP call is easier to explain.
+Cache key: the raw URL or a normalized one (strip tracking params and fragments, lowercase the host), and whether to add a TTL.
+Error handling: what the API returns for bad URLs, timeouts, paywalled or non-article pages, and LLM failures. This is usually where submissions are weakest.
+Sync vs async: FastAPI with requests blocks the event loop inside an async def route. Plain def routes, or httpx with async, avoid that. You’ll want an answer ready for the interview.
+SQLite access: raw sqlite3 vs SQLAlchemy. Raw is simpler and keeps db.py small.
+Which would you like to start with? My suggestion is to sketch the API contract first (endpoints, request and response shapes, error codes), since everything else follows from it.
+
+Noted. I wrote scraper.py. Check it out and if good, write test_scraper.py for me with 3 sample sentences/paragraphs for the purpose of the test.
+
+from urllib.parse import urlparse
+
+import requests
+from bs4 import BeautifulSoup, Tag
+
+TIMEOUT_SECONDS = 10
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ArticleSummarizer/0.1)"}
+ALLOWED_SCHEMES = {"http", "https"}
+
+NOISE_TAGS = ["script", "style", "nav", "footer", "aside", "form"]
+MIN_PARAGRAPH_CHARS = 40
+MIN_ARTICLE_CHARS = 200
+
+
+class ScraperError(Exception):
+    """Raised when the article can't be downloaded or parsed."""
+
+
+def fetch_html(url: str) -> str:
+    if urlparse(url).scheme not in ALLOWED_SCHEMES:
+        raise ScraperError("Only http and https URLs are supported")
+
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT_SECONDS)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise ScraperError(f"Could not fetch the page: {exc}") from exc
+
+    # Without a charset in the headers, requests assumes ISO-8859-1,
+    # which garbles Cyrillic and symbols like €. Fall back to detection.
+    if resp.encoding is None or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding
+
+    return resp.text
+
+
+def extract_article(html: str) -> tuple[str, str]:
+    """Return (title, text) of the article, or raise ScraperError."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    title = _extract_title(soup)
+
+    for tag in soup(NOISE_TAGS):
+        tag.decompose()
+
+    text = ""
+    article = soup.find("article")
+    if article:
+        text = _paragraphs_text(article)
+
+    # No <article>, or it was (almost) empty: use all paragraphs on the page.
+    if len(text) < MIN_ARTICLE_CHARS:
+        text = _paragraphs_text(soup.body or soup)
+
+    if len(text) < MIN_ARTICLE_CHARS:
+        raise ScraperError(
+            "Could not extract article text (page may be paywalled or JS-rendered)"
+        )
+
+    return title, text
+
+
+def _extract_title(soup: BeautifulSoup) -> str:
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        return _clean(h1.get_text(" "))
+    if soup.title and soup.title.get_text(strip=True):
+        return _clean(soup.title.get_text(" "))
+    return ""
+
+
+def _paragraphs_text(container: Tag) -> str:
+    paragraphs = []
+    for p in container.find_all("p"):
+        text = _clean(p.get_text(" "))
+        if len(text) >= MIN_PARAGRAPH_CHARS:
+            paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def _clean(text: str) -> str:
+    return " ".join(text.split())
+Reviewing scraper edge cases before drafting the test suite.
+I’ll set up your scraper in a scratch folder, write the tests there and run them, so you get tests I’ve confirmed pass.
+
+Ran 2 commands
+Your scraper.py is good. I put it in a scratch folder with the tests below, and all 10 tests pass.
+
+Review
+What’s good
+
+The scheme check runs before any network call, and requests errors are wrapped in your own ScraperError, so main.py only needs to catch one exception type.
+The requests ISO-8859-1 pitfall is handled, and the comment explains why.
+It has a sensible fallback chain: <article>, then all <p> tags, then an error. The tuning constants sit at the top of the file.
+fetch_html and extract_article are separate, so parsing is testable without the network.
+The title is read before the noise tags are removed.
+Issues, most important first
+
+form in NOISE_TAGS can wipe whole pages. Older ASP.NET-style sites wrap the entire body in one <form>, and decompose() would delete all the content. You’d get a misleading “paywalled or JS-rendered” error. Either drop form from the list, or remove only forms that don’t contain the article.
+SSRF. A user can submit http://localhost:... or http://169.254.169.254/..., and your server will fetch it. You don’t need to fix this for a prototype, but put it in the README as a known limitation with the fix (resolve the host and block private IP ranges). It’s a good interview talking point.
+No check on the response type or size. A link to a PDF or a multi-GB file is downloaded in full. A cheap fix is to check that Content-Type contains html, and to use stream=True with a byte cap.
+The <h1> may be the site logo. Some sites put the brand in an <h1>. Preferring the <h1> inside <article>, or og:title, is more robust. This is a minor point.
+Paragraphs under 40 characters are dropped. That’s a reasonable trade-off, but mention it in the README.
+Also cap the text length before sending it to the LLM. That belongs in summarizer.py, not here.
+
+Tests
+The tests are in summarizer/tests/test_scraper.py. They use your 3 sample paragraphs as module constants, so they’re easy to reuse. The 10 tests cover:
+
+Title and body extraction, with noise tags excluded and whitespace cleaned.
+The fallback when there’s no <article>, including dropping short paragraphs.
+The title falling back to <title>, then to an empty string.
+The error when there’s too little text.
+fetch_html: rejecting non-http URLs without a network call, wrapping timeouts and HTTP errors, and applying the detected encoding. The network is mocked with unittest.mock.
+python
+from unittest.mock import Mock, patch
+
+import pytest
+import requests
+
+from scraper import ScraperError, extract_article, fetch_html
+
+# Three sample paragraphs, each longer than MIN_PARAGRAPH_CHARS (40) and
+# together longer than MIN_ARTICLE_CHARS (200), so they count as an article.
+PARA_1 = "The central bank held interest rates steady on Thursday, citing persistent inflation in the services sector."
+PARA_2 = "Analysts at several banks had expected a cut, and bond yields rose sharply after the announcement."
+PARA_3 = "Markets in Europe closed lower, with financial stocks leading the decline across most major exchanges."
+
+
+def _page(body: str, head: str = "") -> str:
+    return f"<html><head>{head}</head><body>{body}</body></html>"
+
+
+# ---------- extract_article ----------
+
+
+def test_extracts_title_and_article_paragraphs():
+    html = _page(
+        f"""
+        <nav><p>Home | Markets | Economy | Sign in to your account today</p></nav>
+        <h1>  Central bank   holds rates </h1>
+        <article>
+            <p>{PARA_1}</p>
+            <p>{PARA_2}</p>
+            <p>{PARA_3}</p>
+            <aside><p>Subscribe to our premium newsletter for exclusive content.</p></aside>
+            <script>var tracking = "this paragraph should never appear in output";</script>
+        </article>
+        <footer><p>Copyright 2026 Example Media. All rights reserved worldwide.</p></footer>
+        """
+    )
+
+    title, text = extract_article(html)
+
+    assert title == "Central bank holds rates"  # whitespace normalised
+    assert text == f"{PARA_1}\n\n{PARA_2}\n\n{PARA_3}"
+    assert "Subscribe" not in text
+    assert "Copyright" not in text
+    assert "tracking" not in text
+
+
+def test_falls_back_to_all_paragraphs_when_no_article_tag():
+    html = _page(
+        f"<div><p>{PARA_1}</p><p>too short</p><p>{PARA_2}</p><p>{PARA_3}</p></div>"
+    )
+
+    _, text = extract_article(html)
+
+    assert text == f"{PARA_1}\n\n{PARA_2}\n\n{PARA_3}"  # "too short" is dropped
+
+
+def test_title_falls_back_to_title_tag_then_empty():
+    body = f"<p>{PARA_1}</p><p>{PARA_2}</p><p>{PARA_3}</p>"
+
+    title, _ = extract_article(_page(body, head="<title>Markets Wrap</title>"))
+    assert title == "Markets Wrap"
+
+    title, _ = extract_article(_page(body))
+    assert title == ""
+
+
+def test_raises_when_there_is_too_little_text():
+    html = _page(f"<h1>Paywalled</h1><p>{PARA_1}</p>")  # ~100 chars < 200
+
+    with pytest.raises(ScraperError):
+        extract_article(html)
+
+
+# ---------- fetch_html ----------
+
+
+@pytest.mark.parametrize("url", ["ftp://example.com/a", "file:///etc/passwd", "example.com"])
+def test_fetch_html_rejects_non_http_urls(url):
+    with patch("scraper.requests.get") as mock_get:
+        with pytest.raises(ScraperError):
+            fetch_html(url)
+    mock_get.assert_not_called()  # rejected before any network call
+
+
+def test_fetch_html_returns_page_text():
+    resp = Mock(text="<html>ok</html>", encoding="utf-8")
+    with patch("scraper.requests.get", return_value=resp) as mock_get:
+        assert fetch_html("https://example.com/a") == "<html>ok</html>"
+    assert mock_get.call_args.kwargs["timeout"] == 10
+
+
+def test_fetch_html_wraps_network_and_http_errors():
+    with patch("scraper.requests.get", side_effect=requests.Timeout("slow")):
+        with pytest.raises(ScraperError, match="Could not fetch"):
+            fetch_html("https://example.com/a")
+
+    resp = Mock()
+    resp.raise_for_status.side_effect = requests.HTTPError("404")
+    with patch("scraper.requests.get", return_value=resp):
+        with pytest.raises(ScraperError):
+            fetch_html("https://example.com/a")
+
+
+def test_fetch_html_uses_detected_encoding_when_header_says_latin1():
+    resp = Mock(text="x", encoding="ISO-8859-1", apparent_encoding="utf-8")
+    with patch("scraper.requests.get", return_value=resp):
+        fetch_html("https://example.com/a")
+    assert resp.encoding == "utf-8"
+Run setup. Your tests live in tests/ and import scraper from the project root, so pytest needs to know where the root is. Add a pytest.ini at the root:
+
+ini
+[pytest]
+pythonpath = .
+testpaths = tests
+Then run pytest from summarizer/. Add pytest to requirements.txt, or to a separate requirements-dev.txt.
+
+If you fix issue 1, add a test with a body wrapped in <form> to pin the behavior. Show me the fix and I’ll review it. After that I’d move on to the API contract.
+
+Check updated URL validator
+Yes, that fixes it. I ran your function on a dozen inputs. http://:80 and http://user@/path now return False, so they get a 400. Valid URLs still pass, including localhost:8000, a bare IP, an IPv6 address with a port, and an uppercase scheme and host (urlparse lowercases the scheme).
+
+The validator is done. Bad input gets a 400 before any database, network or model work happens.
+
+Next is test_main.py, and I’m ready to write it against your current main.py. It would use TestClient with fetch_html, summarize and the database mocked, as in my probes, and would cover:
+
+Bad URLs return 400, including the malformed, bad-port and no-host cases.
+A miss returns 200 with cached=False, and a second call returns cached=True. fetch_html and summarize are each called exactly once.
+Different spellings of the same URL hit the same cache entry.
+A fetch ScraperError returns 502, an extract ScraperError returns 422, and a SummarizerError returns 502.
+If the cache read or write raises sqlite3.Error, the request still returns 200.
+A URL over 2048 characters returns 422.
+I can write it now. If you’d rather do index.html first, I’d start there, because the frontend has to handle the two error shapes (a string detail from you and a list from pydantic).
+
+As you know and validated everything yourself, write my readme file, according to the task-description I sent you. Then I'll export this chat here and add it to my repo as well. Go!
+
+Listing design trade-offs and limitations to document honestly.
+I’ll write the README from what we built and tested, and I’ll mark the parts I haven’t seen so the README doesn’t claim anything untrue.
